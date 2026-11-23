@@ -14,9 +14,14 @@ exact bounded slash command a human can paste into Claude Code.</SCOPE></p>
   `GOAL.md` is a deterministic projection. On any mismatch, discard/regenerate
   the goal rather than editing the plan to match it.</GOAL-IS-DERIVED>
       <GOAL-IS-LOCAL fact="true" status="spec/done">The outputs live at
-  `~/.vibe/steward/contexts/&lt;context-id&gt;/{GOAL.md,GOAL-CLAUDE.txt}`. They are
-  never committed, mirrored, packaged, or used to grant another contributor
-  authority.</GOAL-IS-LOCAL>
+  `&lt;steward home&gt;/contexts/&lt;context-id&gt;/{GOAL.md,GOAL-CLAUDE.txt}`
+  (`user-local-state.xml#STATE-HOME`). They are never committed, mirrored,
+  packaged, or used to grant another contributor authority.</GOAL-IS-LOCAL>
+      <GOAL-CONTEXT-SELECTION fact="true" status="spec/done">The renderer takes
+  the context either as `--context &lt;dir&gt;` or, with `--resolve`, from the
+  repository in the current directory through
+  `user-local-state.xml#CONTEXT-RESOLUTION`; `--home` overrides the steward
+  home.</GOAL-CONTEXT-SELECTION>
       <GOAL-HAS-NO-LLM fact="true" status="spec/done">Canonical bytes use no
   model completion, paraphrase, chat history or provider call. An LLM may
   explain the result separately; it never rewrites `GOAL.md`.</GOAL-HAS-NO-LLM>
@@ -80,14 +85,15 @@ their declaration order. No map/hash iteration order enters output.</ORDER></p>
   candidate is never described as complete merely because bytes exist.</PROJECT-CANDIDATES>
       <PROJECT-ROUTE fact="true" status="spec/done">**Remaining route:** every
   subtree node not in `accepted | dropped | superseded | deferred`, in pre-order,
-  with id, title, state and explicit dependencies. Ancestors remain, so a short
+  with id, title, state and explicit dependencies — its start gates always, and
+  its own completion gates when it declares any. Ancestors remain, so a short
   UI frontier cannot erase distant stages.</PROJECT-ROUTE>
       <PROJECT-DEFERRED fact="true" status="spec/done">**Deferred horizon:**
   deferred subtree nodes, with their acceptance/revisit condition. Dropped and
   superseded nodes are omitted from execution but their mandate dispositions
   remain visible above.</PROJECT-DEFERRED>
       <PROJECT-CLOSURE fact="true" status="spec/done">**Completion proof:** the
-  selected node's acceptance plus acceptance lines of every non-accepted
+  selected node's acceptance plus acceptance lines of every non-terminal
   descendant whose kind is `gate`, in pre-order. Empty queues and completed UI
   rows are explicitly insufficient.</PROJECT-CLOSURE>
       <PROJECT-PROFILE fact="true" status="spec/done">**Execution profile:** one
@@ -137,8 +143,10 @@ the named alternative proof; their bounded episode never resets on restart. When
 is authorized, continue across accepted intermediate atoms until the requested
 boundary, completion, an owner-only decision, external blocker, conflicting
 live writer or explicit formal handoff. Context loss or worker termination
-is not completion. Declare completion only when every completion proof is
-satisfied.”</CONTINUITY-TEXT></p>
+is not completion. The goal is complete when every node of the route is
+terminal: accepted, dropped, deferred or superseded. A check the owner waived
+is dropped, not open. When no open node can move without an outside action,
+state what is needed once and stop.”</CONTINUITY-TEXT></p>
   </bytes>
   <claude title="6. Claude Code goal-command adapter">
     <p><CLAUDE-OBSERVED-SURFACE fact="true" status="spec/done">Claude Code
@@ -153,9 +161,10 @@ one ASCII space. A human copies the whole trimmed file and pastes it into the
 interactive prompt. Agents never invoke slash commands on the user's behalf.</CLAUDE-FILE></p>
     <p><CLAUDE-CONDITION fact="true" status="spec/done">The condition is assembled
 in this fixed order: (1) “Within current owner-authorized scope, complete campaign
-[id] title exactly as the current stewardship plan.toml revision N defines,
-including every non-terminal descendant and every completion proof recorded in
-GOAL.md.”; (2) candidate ids/titles; (3) non-terminal direct child route
+[id] title exactly as the current stewardship plan.toml revision N defines.
+Nodes added later do not extend this condition. It is satisfied when the selected
+node and all its descendants at that revision are terminal, or when the latest
+message names an outside action that every open node awaits.”; (2) candidate ids/titles; (3) non-terminal direct child route
 ids/titles/states; (4) “Current owner scope wins, including status/planning-only
 and stop. On cold start, compact/resume or model/account change read the complete
 plan.toml and refresh stale GOAL.md; while warm, reuse the validated full plan
@@ -170,8 +179,10 @@ designated final comprehensive gate. Mutation diagnostics need concrete suspicio
 the named alternative proof. During authorized execution continue across intermediate atoms
 until the requested boundary, completion, owner-only decision, external
 blocker, conflicting live writer or explicit formal handoff. Process ending
-is not completion; the goal is met only when the selected node is accepted
-with all required descendants/gates and owner inspection.”</CLAUDE-CONDITION></p>
+is not completion; the goal is met when the selected node and every
+descendant are terminal: accepted, dropped, deferred or superseded. Checks
+the owner waived are dropped, not open. If blocked on an outside action,
+state it once and stop.”</CLAUDE-CONDITION></p>
     <p><CLAUDE-BOUNDING fact="true" status="spec/done">Bounding never truncates
 the mandatory first/fourth clauses. Add candidate entries in pre-order, then
 direct-child route entries in order. If the next full `id + title + state` entry
@@ -256,6 +267,9 @@ canonical paragraph</fence>
       <REFUSE-CLAUDE-LIMIT fact="true" status="spec/done">`GOAL_CLAUDE_BASE_TOO_LONG`:
   mandatory condition clauses alone exceed the observed client cap; canonical
   GOAL remains available.</REFUSE-CLAUDE-LIMIT>
+      <REFUSE-CONTEXT fact="true" status="spec/done">`GOAL_CONTEXT_UNRESOLVED`:
+  `--resolve` found no context or several candidates; nothing is written and the
+  candidates are named.</REFUSE-CONTEXT>
     </facts>
   </refusals>
   <companion title="10. Automation boundary">

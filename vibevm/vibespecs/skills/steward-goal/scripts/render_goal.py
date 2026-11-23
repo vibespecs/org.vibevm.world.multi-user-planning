@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import tempfile
 import tomllib
 from typing import Any
@@ -16,6 +17,8 @@ from typing import Any
 
 SCHEMA = 1
 CLAUDE_CONDITION_MAX_UTF16 = 4000
+# Shared steward-home resolution (`user-local-state.xml#CONTEXT-RESOLUTION`).
+STEWARD_HOME = Path(__file__).resolve().parents[2] / "steward-common/scripts/steward_home.py"
 TERMINAL_SELECTION_STATES = {"accepted", "dropped", "superseded", "deferred"}
 ROUTE_TERMINAL_STATES = {"accepted", "dropped", "superseded", "deferred"}
 ALLOWED_STATES = {
@@ -81,8 +84,10 @@ CONTINUITY_TEXT = (
     "is authorized, continue across accepted intermediate atoms until the requested "
     "boundary, completion, an owner-only decision, external blocker, conflicting "
     "live writer or explicit formal handoff. Context loss or worker termination "
-    "is not completion. Declare completion only when every completion proof is "
-    "satisfied."
+    "is not completion. The goal is complete when every node of the route is "
+    "terminal: accepted, dropped, deferred or superseded. A check the owner waived "
+    "is dropped, not open. When no open node can move without an outside action, "
+    "state what is needed once and stop."
 )
 CLAUDE_CONTINUITY = (
     "Current owner scope wins, including status/planning-only and stop. On cold "
@@ -99,8 +104,10 @@ CLAUDE_CONTINUITY = (
     "the named alternative proof. During authorized execution continue across intermediate atoms "
     "until the requested boundary, completion, owner-only decision, external "
     "blocker, conflicting live writer or explicit formal handoff. Process ending "
-    "is not completion; the goal is met only when the selected node is accepted "
-    "with all required descendants/gates and owner inspection."
+    "is not completion; the goal is met when the selected node and every "
+    "descendant are terminal: accepted, dropped, deferred or superseded. Checks "
+    "the owner waived are dropped, not open. If blocked on an outside action, "
+    "state it once and stop."
 )
 
 
@@ -165,6 +172,16 @@ def require_str_list(row: dict[str, Any], key: str, owner: str) -> list[str]:
     return value
 
 
+def completion_gates(row: dict[str, Any]) -> list[str]:
+    """`completes_after` is optional: an absent field is no completion gate.
+
+    It gates only this node's own acceptance and is never inherited, so every
+    plan written before the field exists keeps its exact meaning.
+    """
+    value = row.get("completes_after")
+    return list(value) if isinstance(value, list) else []
+
+
 def detect_cycle(edges: dict[str, list[str]], label: str) -> None:
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -219,6 +236,7 @@ def validate_plan(plan: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
 
     parent_edges: dict[str, list[str]] = {}
     dep_edges: dict[str, list[str]] = {}
+    gate_edges: dict[str, list[str]] = {}
     for node_id, row in by_id.items():
         parent = require_str(row, "parent", node_id)
         if parent and parent not in by_id:
@@ -229,6 +247,16 @@ def validate_plan(plan: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
         if missing_deps:
             raise GoalError("GOAL_PLAN_INVALID", f"{node_id} has missing dependencies {missing_deps}")
         dep_edges[node_id] = deps
+        if "completes_after" in row:
+            require_str_list(row, "completes_after", node_id)
+        gates = completion_gates(row)
+        missing_gates = [gate for gate in gates if gate not in by_id]
+        if missing_gates:
+            raise GoalError("GOAL_PLAN_INVALID",
+                            f"{node_id} has missing completion gates {missing_gates}")
+        if node_id in gates:
+            raise GoalError("GOAL_PLAN_INVALID", f"{node_id} completes after itself")
+        gate_edges[node_id] = gates
         refs = require_str_list(row, "mandates", node_id)
         missing_mandates = [mid for mid in refs if mid not in mandate_ids]
         if missing_mandates:
@@ -247,7 +275,10 @@ def validate_plan(plan: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
             raise GoalError("GOAL_PLAN_INVALID", f"{node_id}.order must be an integer")
 
     detect_cycle(parent_edges, "parent")
-    detect_cycle(dep_edges, "dependency")
+    # A start gate and a completion gate can deadlock each other, so both edge
+    # kinds share one acyclicity check.
+    detect_cycle({key: dep_edges[key] + gate_edges[key] for key in by_id},
+                 "dependency/completion-gate")
     root_node = require_str(plan, "root_node", "plan")
     current_node = require_str(plan, "current_node", "plan")
     if root_node not in by_id or current_node not in by_id:
@@ -421,8 +452,10 @@ def build_condition(selected: dict[str, Any], subtree: list[dict[str, Any]], rev
     base = collapse_ws(
         f"Within current owner-authorized scope, complete campaign [{selected['id']}] "
         f"{selected['title']} exactly as the current "
-        f"stewardship plan.toml revision {revision} defines, including every non-terminal "
-        "descendant and every completion proof recorded in GOAL.md."
+        f"stewardship plan.toml revision {revision} defines. Nodes added later do not "
+        "extend this condition. It is satisfied when the selected node and all its "
+        "descendants at that revision are terminal, or when the latest message names "
+        "an outside action that every open node awaits."
     )
     continuity = collapse_ws(CLAUDE_CONTINUITY)
     mandatory = base + " " + continuity
@@ -531,8 +564,11 @@ def render(snapshot: dict[str, Any]) -> tuple[bytes, bytes | None, dict[str, Any
     lines.extend(["", "## Remaining route"])
     for node in remaining:
         deps = ", ".join(node["depends_on"]) if node["depends_on"] else "none"
+        gates = completion_gates(node)
+        suffix = f"; completes after: {', '.join(gates)}" if gates else ""
         lines.append(
-            f"- [{node['id']}] {node['state']} — {md_text(node['title'])}; depends on: {deps}"
+            f"- [{node['id']}] {node['state']} — {md_text(node['title'])}; "
+            f"depends on: {deps}{suffix}"
         )
     if not remaining:
         lines.append("- None.")
@@ -549,7 +585,7 @@ def render(snapshot: dict[str, Any]) -> tuple[bytes, bytes | None, dict[str, Any
 
     closure = list(selected["acceptance"])
     for node in subtree:
-        if node["kind"] == "gate" and node["state"] != "accepted":
+        if node["kind"] == "gate" and node["state"] not in ROUTE_TERMINAL_STATES:
             closure.extend(node["acceptance"])
     closure = unique_texts(closure)
     lines.extend(["", "## Completion proof"])
@@ -660,8 +696,25 @@ def current_status(context: Path, goal_bytes: bytes, claude_bytes: bytes | None)
     return not reasons, reasons
 
 
+def context_of(args: argparse.Namespace) -> Path:
+    """`--context`, or the current repository's context through the resolver."""
+    if not getattr(args, "resolve", False):
+        return args.context
+    steward = runpy.run_path(str(STEWARD_HOME))
+    try:
+        result = steward["resolve"](steward["steward_home"](getattr(args, "home", None)), Path.cwd())
+    except steward["StewardError"] as exc:
+        raise GoalError("GOAL_CONTEXT_UNRESOLVED", f"{exc.code}: {exc}") from exc
+    if result.status == "found":
+        return result.context_dir
+    if result.status == "ambiguous":
+        names = ", ".join(candidate.context_id for candidate in result.candidates)
+        raise GoalError("GOAL_CONTEXT_UNRESOLVED", f"several contexts match; name one with --context: {names}")
+    raise GoalError("GOAL_CONTEXT_UNRESOLVED", "no steward context is bound to this repository")
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    context = args.context.resolve()
+    context = context_of(args).resolve()
     if not context.is_dir():
         raise GoalError("GOAL_PLAN_INVALID", f"context directory not found: {context}")
     last_moved = False
@@ -723,7 +776,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--context", type=Path, required=True)
+    source = result.add_mutually_exclusive_group(required=True)
+    source.add_argument("--context", type=Path, help="steward context directory")
+    source.add_argument("--resolve", action="store_true",
+                        help="resolve the context of the repository in the current directory")
+    result.add_argument("--home", type=Path, help="steward home for --resolve; default <settings dir>/steward")
     result.add_argument(
         "--holder-id",
         help="deprecated compatibility metadata; not an ordinary publication gate",

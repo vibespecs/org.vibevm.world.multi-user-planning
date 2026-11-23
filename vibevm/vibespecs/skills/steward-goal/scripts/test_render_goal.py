@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 from types import SimpleNamespace
 import tempfile
 import unittest
@@ -436,6 +440,109 @@ class RendererTests(unittest.TestCase):
         self.assertTrue(condition.endswith(render_goal.collapse_ws(render_goal.CLAUDE_CONTINUITY)))
         self.assertEqual(command.count("\n"), 0)
         self.assertEqual(result["claude_condition_utf16_units"], render_goal.utf16_units(condition))
+
+
+class CompletionGateTests(unittest.TestCase):
+    """`completes_after` is optional, validated, acyclic and never inherited."""
+
+    @staticmethod
+    def node(key: str, **overrides: object) -> dict:
+        row = {
+            "id": key, "parent": "ROOT", "order": 10, "kind": "atom",
+            "title": f"Node {key}", "state": "planned", "zoom": "expanded",
+            "depends_on": [], "mandates": [], "acceptance": ["review"], "evidence": [],
+        }
+        row.update(overrides)
+        return row
+
+    def plan(self, *nodes: dict) -> dict:
+        return {
+            "schema": 1, "plan_id": "gates", "revision": 2, "root_node": "ROOT",
+            "current_node": "ROOT", "mandate": [],
+            "node": [self.node("ROOT", parent="", kind="campaign", order=0,
+                               state="active"), *nodes],
+        }
+
+    def refusal(self, plan: dict) -> str:
+        with self.assertRaises(render_goal.GoalError) as caught:
+            render_goal.validate_plan(plan)
+        self.assertEqual(caught.exception.code, "GOAL_PLAN_INVALID")
+        return str(caught.exception)
+
+    def test_absent_field_keeps_every_older_plan_valid(self) -> None:
+        render_goal.validate_plan(self.plan(self.node("A")))
+        render_goal.validate_plan(self.plan(self.node("A", completes_after=[])))
+
+    def test_declared_gate_must_be_a_string_array_of_known_ids(self) -> None:
+        self.assertIn("must be a string array",
+                      self.refusal(self.plan(self.node("A", completes_after="B"))))
+        self.assertIn("missing completion gates",
+                      self.refusal(self.plan(self.node("A", completes_after=["GHOST"]))))
+        self.assertIn("completes after itself",
+                      self.refusal(self.plan(self.node("A", completes_after=["A"]))))
+
+    def test_start_and_completion_gates_cannot_deadlock_each_other(self) -> None:
+        deadlock = self.plan(self.node("A", depends_on=["B"]),
+                             self.node("B", order=20, completes_after=["A"]))
+        self.assertIn("cycle", self.refusal(deadlock))
+        fine = self.plan(self.node("A", completes_after=["B"]),
+                         self.node("B", order=20, depends_on=[]))
+        render_goal.validate_plan(fine)
+
+    def test_a_gate_is_not_inherited_by_descendants(self) -> None:
+        plan = self.plan(self.node("P", kind="phase", completes_after=["X"]),
+                         self.node("P.1", parent="P"),
+                         self.node("X", order=90))
+        _, _, by_id = render_goal.validate_plan(plan)
+        self.assertEqual(render_goal.completion_gates(by_id["P"]), ["X"])
+        self.assertEqual(render_goal.completion_gates(by_id["P.1"]), [])
+
+    def test_the_route_names_a_declared_gate_and_stays_silent_otherwise(self) -> None:
+        snapshot = {
+            "plan": self.plan(self.node("C", kind="campaign", completes_after=["X"]),
+                              self.node("X", order=90)),
+            "settings": {"goal_node": "C"}, "config": {}, "plan_sha": "0" * 64,
+        }
+        goal = render_goal.render(snapshot)[0].decode("utf-8")
+        self.assertIn("[C] planned — Node C; depends on: none; completes after: X", goal)
+        quiet = dict(snapshot, plan=self.plan(self.node("C", kind="campaign")))
+        self.assertNotIn("completes after", render_goal.render(quiet)[0].decode("utf-8"))
+
+
+class ResolveTests(unittest.TestCase):
+    """`--resolve` finds the context through the shared steward-home resolver."""
+
+    def test_resolve_publishes_into_the_bound_context_and_refuses_without_one(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            home = root / "settings" / "steward"
+            shutil.copytree(FIXTURE / "home", home)
+            context = home / "contexts" / "00000000-0000-4000-8000-000000000001"
+            (context / "GOAL.md").unlink(missing_ok=True)
+            (context / "GOAL-CLAUDE.txt").unlink(missing_ok=True)
+            repo = root / "repo"
+            repo.mkdir()
+            env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+            env.update({"PYTHONIOENCODING": "utf-8", "HOME": str(root), "GIT_CONFIG_NOSYSTEM": "1",
+                        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CEILING_DIRECTORIES": str(root.parent)})
+            for args in (["init", "-q", "-b", "main"],
+                         ["-c", "user.name=F", "-c", "user.email=f@example.invalid",
+                          "commit", "-q", "--allow-empty", "-m", "root"]):
+                subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True)
+            command = [sys.executable, "-B", "-I", str(HERE / "render_goal.py"), "--resolve", "--home", str(home)]
+            run = subprocess.run(command, cwd=repo, env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+            self.assertEqual(json.loads(run.stdout)["code"], "GOAL_CONTEXT_UNRESOLVED")
+            self.assertFalse((context / "GOAL.md").exists())
+            root_commit = subprocess.run(["git", "rev-list", "--max-parents=0", "HEAD"], cwd=repo, env=env,
+                                         check=True, capture_output=True, text=True).stdout.strip()
+            (context / "binding.toml").write_text(
+                f'schema = 2\ncontext_id = "{context.name}"\nproject_name = "example"\n'
+                f'repository_id = "{root_commit}"\ndefault = true\nrevisions = []\n', encoding="utf-8")
+            run = subprocess.run(command, cwd=repo, env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertEqual(json.loads(run.stdout)["goal_path"], str(context / "GOAL.md"))
+            self.assertTrue((context / "GOAL.md").is_file())
 
 
 if __name__ == "__main__":

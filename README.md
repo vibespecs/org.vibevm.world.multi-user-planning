@@ -51,6 +51,14 @@ evidence mechanics that any capable agent or human coordinator can use.
   interaction mode in `user-local-state.xml`. @status:impl/done
 - @fact:CONTENT-PLAN The lossless hierarchical plan and receding-horizon
   planning discipline in `plan-hierarchy.xml`. @status:impl/done
+- @fact:CONTENT-TWO-GATE-KINDS Two dependency kinds in `plan-hierarchy.xml`:
+  the inherited start gate `depends_on`, unchanged, and the optional per-node
+  completion gate `completes_after`, which withholds that one node's acceptance
+  without gating its start, its dispatch or its descendants. It names a parent's
+  own final step — a design that generalises what its children already
+  delivered — without stalling every child. Both kinds share one acyclicity
+  check; an absent field is no gate, so every older plan keeps its exact
+  meaning. @status:impl/done
 - @fact:CONTENT-GOAL The deterministic, user-local goal projection in
   `goal-projection.xml`: one selected campaign node, its governing mandates,
   accepted boundary, candidates, complete remaining route and closure proof;
@@ -81,11 +89,36 @@ evidence mechanics that any capable agent or human coordinator can use.
 - @fact:CONTENT-MIGRATION The composition and migration rules for projects
   leaving `wal`/`wal-specspaces`, including the redbook exclusion recipe, in
   `migration-and-composition.xml`. @status:impl/done
-- @fact:CONTENT-SKILLS Four optional agent skills: status-only orientation,
-  explicit same-machine formal handoff, deterministic goal refresh, and
+- @fact:CONTENT-PLAN-DISPLAY The display vocabulary every viewer of a plan
+  shares, in `plan-hierarchy.xml`: the fixed state-to-bucket map that keeps
+  `candidate` («Сделано · ждёт приёмки») distinct from `accepted`, the
+  leaf-descendant counting rule, and the law that a rendered tree is derived
+  navigation carrying the validator's verdict. @status:spec/done
+- @fact:CONTENT-SKILLS Six optional agent skills: status-only orientation,
+  explicit same-machine formal handoff, deterministic goal refresh,
   `steward-parallel` for a read-only JSON frontier with readiness, conflicts,
-  candidate batches and review backlog. They are not `vibe.exe` commands.
+  candidate batches and review backlog, `steward-tree` for a static offline
+  HTML tree of any conformant plan, and `steward-common` for locating the
+  steward home and context and for explicit portable binding. They are not
+  `vibe.exe` commands. @status:impl/done
+- @fact:CONTENT-CONTEXT A portable steward home in
+  `vibevm/vibespecs/skills/steward-common`: the home is `$VIBE_SETTINGS/steward`
+  or `~/.vibe/steward`; a context is bound to a repository by its root commit
+  id rather than by a path, so the whole home can be copied to another of the
+  same person's machines and still resolve. `resolve_context.py` is read-only;
+  `bind_context.py` writes a schema-2 binding only on explicit request.
   @status:impl/done
+- @fact:CONTENT-TREE A generic plan viewer in
+  `vibevm/vibespecs/skills/steward-tree`: `render_tree.py --resolve` (or
+  `--context <dir>`) writes the context's disposable `view/`, and
+  `render_tree.py --plan <plan.toml> --out <dir> [--watch]` renders any plan;
+  either writes a self-contained `index.html` plus
+  `plan-tree.json` atomically, with no network, no build step and no
+  project-specific layer. It shows the node tree, the full state vocabulary in
+  display buckets, per-parent leaf counts, typed dependency edges and their
+  reverse direction, acceptance, evidence, mandates, unknown extra fields, and
+  the plan validator's verdict with per-node warnings. Plan text is rendered as
+  data, never as markup. @status:impl/done
 
 ## Authority boundary {#authority}
 
